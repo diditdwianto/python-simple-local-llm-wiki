@@ -1,6 +1,6 @@
 """Flask web UI for the local LLM wiki.
 
-Run as: python -m src.app   (then open http://127.0.0.1:5555)
+Run as: python -m src.app   (then open http://127.0.0.1:5566)
 
 Features:
   - Browse notes in the vault (left sidebar)

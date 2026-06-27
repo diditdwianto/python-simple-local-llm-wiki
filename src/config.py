@@ -42,7 +42,7 @@ class Settings:
 
     # --- Web UI ---
     flask_host: str = os.getenv("FLASK_HOST", "127.0.0.1")
-    flask_port: int = int(os.getenv("FLASK_PORT", "5555"))
+    flask_port: int = int(os.getenv("FLASK_PORT", "5566"))
 
 
 settings = Settings()

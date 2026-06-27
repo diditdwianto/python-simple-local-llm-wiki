@@ -82,7 +82,7 @@ python -m src.ingest
 python -m src.query "How does the wiki grow itself?"
 
 # 2b) …or launch the web UI
-python -m src.app      # http://127.0.0.1:5555
+python -m src.app      # http://127.0.0.1:5566
 
 # 3) (optional) auto-reindex while you edit notes
 python -m src.watcher

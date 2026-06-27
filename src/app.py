@@ -9,15 +9,17 @@ Features:
   - Save a generated answer as a new note (re-indexed on the next save/watch)
 """
 import glob
+import json
 import os
 
 import markdown as md
-from flask import Flask, redirect, render_template_string, request, url_for
+from flask import (Flask, Response, redirect, render_template_string, request,
+                   stream_with_context, url_for)
 
 from .config import settings
 from .ingest import ingest
 from .note_writer import save_note
-from .query import answer
+from .query import answer, answer_streamed
 
 app = Flask(__name__)
 
@@ -53,6 +55,22 @@ PAGE = """
     .note-body { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
                  padding: 22px 26px; }
     pre { background: #f3f4f6; padding: 12px; border-radius: 8px; overflow-x: auto; }
+    .activity { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+                padding: 14px 18px; margin-top: 18px; display: none; }
+    .activity h4 { margin: 0 0 8px; font-size: 12px; color: #6b7280;
+                   text-transform: uppercase; letter-spacing: .05em; }
+    .stage { display: flex; align-items: center; gap: 9px; padding: 4px 0;
+             font-size: 14px; color: #6b7280; }
+    .stage.done { color: #111827; }
+    .stage .ms { margin-left: auto; color: #6b7280;
+                 font-variant-numeric: tabular-nums; }
+    .total { margin-top: 8px; font-size: 13px; color: #374151; font-weight: 600; }
+    .check { color: #16a34a; font-weight: 700; width: 13px; text-align: center; }
+    .spinner { display: inline-block; width: 13px; height: 13px; box-sizing: border-box;
+               border: 2px solid #c7d2fe; border-top-color: #2563eb;
+               border-radius: 50%; animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    button:disabled { opacity: .55; cursor: default; }
   </style>
 </head>
 <body>
@@ -73,29 +91,21 @@ PAGE = """
       {% endfor %}
     </div>
     <div class="main">
-      <form action="{{ url_for('ask') }}" method="post">
-        <textarea name="question" rows="3"
+      <form id="ask-form">
+        <textarea id="question" rows="3"
           placeholder="Ask your wiki anything…">{{ question or '' }}</textarea>
-        <div style="margin-top:10px"><button type="submit">Ask</button></div>
+        <div style="margin-top:10px">
+          <button id="ask-btn" type="submit">Ask</button>
+        </div>
       </form>
 
-      {% if response %}
-        <div class="answer">
-          {{ response_html | safe }}
-          {% if sources %}
-          <div class="sources">
-            Sources:
-            {% for s in sources %}<code>{{ s }}</code> {% endfor %}
-          </div>
-          {% endif %}
-          <form action="{{ url_for('save') }}" method="post" style="margin-top:14px">
-            <input type="hidden" name="question" value="{{ question }}">
-            <input type="hidden" name="answer" value="{{ response }}">
-            <input type="hidden" name="sources" value="{{ sources_csv }}">
-            <button type="submit">💾 Save as note</button>
-          </form>
-        </div>
-      {% endif %}
+      <div class="activity" id="activity">
+        <h4>Activity</h4>
+        <div id="stages"></div>
+        <div class="total" id="total"></div>
+      </div>
+
+      <div id="answer"></div>
 
       {% if note_html %}
         <h2>{{ note_name }}</h2>
@@ -103,6 +113,121 @@ PAGE = """
       {% endif %}
     </div>
   </div>
+  <script>
+    const form = document.getElementById('ask-form');
+    const qEl = document.getElementById('question');
+    const btn = document.getElementById('ask-btn');
+    const activityEl = document.getElementById('activity');
+    const stagesEl = document.getElementById('stages');
+    const totalEl = document.getElementById('total');
+    const answerEl = document.getElementById('answer');
+    let timer = null, t0 = 0, currentQ = '';
+
+    function fmt(ms) {
+      return ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : Math.round(ms) + ' ms';
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      const q = qEl.value.trim();
+      if (q) ask(q);
+    });
+
+    function ask(q) {
+      currentQ = q;
+      btn.disabled = true;
+      answerEl.innerHTML = '';
+      stagesEl.innerHTML = '';
+      totalEl.textContent = '';
+      activityEl.style.display = 'block';
+      t0 = performance.now();
+      clearInterval(timer);
+      timer = setInterval(function () {
+        totalEl.textContent = 'Elapsed: ' + fmt(performance.now() - t0);
+      }, 100);
+
+      const rows = {};
+      let done = false;
+      const es = new EventSource('/ask_stream?question=' + encodeURIComponent(q));
+
+      es.addEventListener('stage_start', function (e) {
+        const d = JSON.parse(e.data);
+        const row = document.createElement('div');
+        row.className = 'stage';
+        row.innerHTML = '<span class="spinner"></span>' +
+          '<span class="label">' + d.name + '</span><span class="ms"></span>';
+        stagesEl.appendChild(row);
+        rows[d.name] = row;
+      });
+
+      es.addEventListener('stage_done', function (e) {
+        const d = JSON.parse(e.data);
+        const row = rows[d.name];
+        if (!row) return;
+        row.classList.add('done');
+        const sp = row.querySelector('.spinner');
+        if (sp) sp.outerHTML = '<span class="check">✓</span>';
+        const extra = (d.hits !== undefined) ? ' · ' + d.hits + ' hits' : '';
+        row.querySelector('.ms').textContent = fmt(d.ms) + extra;
+      });
+
+      es.addEventListener('result', function (e) {
+        const d = JSON.parse(e.data);
+        done = true;
+        clearInterval(timer);
+        totalEl.textContent = 'Total: ' + fmt(d.total_ms);
+        es.close();
+        btn.disabled = false;
+        renderAnswer(d);
+      });
+
+      es.addEventListener('fail', function (e) {
+        done = true;
+        clearInterval(timer);
+        es.close();
+        btn.disabled = false;
+        let msg = 'Request failed.';
+        try { msg = JSON.parse(e.data).message; } catch (_) {}
+        answerEl.innerHTML = '<div class="answer">⚠️ ' + msg + '</div>';
+      });
+
+      es.onerror = function () {
+        if (done) return;
+        done = true;
+        clearInterval(timer);
+        es.close();
+        btn.disabled = false;
+        answerEl.innerHTML = '<div class="answer">⚠️ Connection lost.</div>';
+      };
+    }
+
+    function renderAnswer(d) {
+      const wrap = document.createElement('div');
+      wrap.className = 'answer';
+      wrap.innerHTML = d.answer_html;
+      if (d.sources && d.sources.length) {
+        const s = document.createElement('div');
+        s.className = 'sources';
+        s.innerHTML = 'Sources: ' + d.sources.map(function (x) {
+          return '<code>' + x + '</code>';
+        }).join(' ');
+        wrap.appendChild(s);
+      }
+      const f = document.createElement('form');
+      f.action = '/save';
+      f.method = 'post';
+      f.style.marginTop = '14px';
+      f.innerHTML = '<input type="hidden" name="question">' +
+        '<input type="hidden" name="answer">' +
+        '<input type="hidden" name="sources">' +
+        '<button type="submit">💾 Save as note</button>';
+      f.question.value = currentQ;
+      f.answer.value = d.answer;
+      f.sources.value = (d.sources || []).join(', ');
+      wrap.appendChild(f);
+      answerEl.appendChild(wrap);
+    }
+  </script>
 </body>
 </html>
 """
@@ -161,6 +286,50 @@ def ask():
         response_html=md.markdown(response, extensions=["fenced_code", "tables"]),
         sources=sources,
         sources_csv=", ".join(sources),
+    )
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@app.route("/ask_stream")
+def ask_stream():
+    """Stream the pipeline stage by stage as Server-Sent Events.
+
+    The browser opens this with EventSource and renders each stage live with
+    its elapsed time, so the user sees what is happening during the LLM wait.
+    """
+    question = (request.args.get("question") or "").strip()
+
+    def gen():
+        if not question:
+            yield _sse("fail", {"message": "Empty question."})
+            return
+        try:
+            for event, data in answer_streamed(question):
+                if event == "result":
+                    sources = sorted({c["source"] for c in data["contexts"]})
+                    yield _sse("result", {
+                        "answer": data["answer"],
+                        "answer_html": md.markdown(
+                            data["answer"], extensions=["fenced_code", "tables"]
+                        ),
+                        "sources": sources,
+                        "total_ms": data["total_ms"],
+                    })
+                else:
+                    yield _sse(event, data)
+        except FileNotFoundError:
+            yield _sse("fail", {"message": "No index found yet. Click "
+                                "“Re-index vault” first."})
+        except Exception as exc:  # surface the error in the activity panel
+            yield _sse("fail", {"message": str(exc)})
+
+    return Response(
+        stream_with_context(gen()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

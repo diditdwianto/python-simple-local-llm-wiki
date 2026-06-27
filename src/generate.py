@@ -42,6 +42,11 @@ def _build_user_prompt(question: str, contexts: List[Dict]) -> str:
     return f"Context from the wiki:\n\n{blocks}\n\nQuestion: {question}"
 
 
+def build_llm_input(question: str, contexts: List[Dict]) -> Dict:
+    """Return the exact system + user messages that will be sent to the LLM."""
+    return {"system": SYSTEM_PROMPT, "user": _build_user_prompt(question, contexts)}
+
+
 def generate(question: str, contexts: List[Dict]) -> str:
     """Generate an answer grounded in `contexts` using the configured provider."""
     user_prompt = _build_user_prompt(question, contexts)

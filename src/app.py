@@ -70,6 +70,22 @@ PAGE = """
     .live { white-space: pre-wrap; }
     .live::after { content: "▍"; color: #2563eb; animation: blink 1s step-end infinite; }
     @keyframes blink { 50% { opacity: 0; } }
+    .disc { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+            margin-top: 12px; padding: 0 16px; }
+    .disc > summary { cursor: pointer; padding: 12px 0; font-size: 14px;
+                      font-weight: 600; color: #374151; list-style: none; }
+    .disc > summary::-webkit-details-marker { display: none; }
+    .disc > summary::before { content: "▸"; display: inline-block; margin-right: 8px;
+                              color: #9ca3af; transition: transform .15s; }
+    .disc[open] > summary::before { transform: rotate(90deg); }
+    .disc-body { padding: 0 0 14px; }
+    .hit { border-top: 1px solid #f3f4f6; padding: 10px 0; font-size: 13px; }
+    .hit-head { display: flex; justify-content: space-between; color: #111827; }
+    .hit-head .score { color: #6b7280; font-variant-numeric: tabular-nums; }
+    .hit-text { color: #4b5563; margin-top: 4px; white-space: pre-wrap;
+                max-height: 130px; overflow: auto; }
+    .disc-body pre { white-space: pre-wrap; font-size: 12px; margin: 0;
+                     max-height: 360px; overflow: auto; }
     .check { color: #16a34a; font-weight: 700; width: 13px; text-align: center; }
     .spinner { display: inline-block; width: 13px; height: 13px; box-sizing: border-box;
                border: 2px solid #c7d2fe; border-top-color: #2563eb;
@@ -111,6 +127,7 @@ PAGE = """
         <div class="total" id="total"></div>
       </div>
 
+      <div id="extras"></div>
       <div id="answer"></div>
 
       {% if note_html %}
@@ -127,6 +144,7 @@ PAGE = """
     const stagesEl = document.getElementById('stages');
     const llmstatsEl = document.getElementById('llmstats');
     const totalEl = document.getElementById('total');
+    const extrasEl = document.getElementById('extras');
     const answerEl = document.getElementById('answer');
     let timer = null, t0 = 0, currentQ = '';
 
@@ -145,6 +163,7 @@ PAGE = """
       btn.disabled = true;
       answerEl.innerHTML = '';
       stagesEl.innerHTML = '';
+      extrasEl.innerHTML = '';
       llmstatsEl.textContent = '';
       totalEl.textContent = '';
       activityEl.style.display = 'block';
@@ -156,7 +175,7 @@ PAGE = """
 
       const rows = {};
       let done = false, activeRow = null, ttftMs = null;
-      let liveEl = null, liveText = '';
+      let liveEl = null, liveText = '', promptSummary = null;
       const es = new EventSource('/ask_stream?question=' + encodeURIComponent(q));
 
       es.addEventListener('stage_start', function (e) {
@@ -168,6 +187,57 @@ PAGE = """
         stagesEl.appendChild(row);
         rows[d.name] = row;
         activeRow = row;
+      });
+
+      es.addEventListener('retrieval', function (e) {
+        const d = JSON.parse(e.data);
+        const det = document.createElement('details');
+        det.className = 'disc';
+        const sum = document.createElement('summary');
+        sum.textContent = '🔍 Search vault hits (' + d.hits.length + ')';
+        det.appendChild(sum);
+        const body = document.createElement('div');
+        body.className = 'disc-body';
+        d.hits.forEach(function (h) {
+          const hit = document.createElement('div');
+          hit.className = 'hit';
+          const head = document.createElement('div');
+          head.className = 'hit-head';
+          const src = document.createElement('span');
+          src.textContent = (h.source || '(untitled)') +
+            (h.path ? '  ·  ' + h.path + ' #' + h.chunk : '');
+          const sc = document.createElement('span');
+          sc.className = 'score';
+          sc.textContent = 'score ' + h.score;
+          head.appendChild(src);
+          head.appendChild(sc);
+          const txt = document.createElement('div');
+          txt.className = 'hit-text';
+          txt.textContent = h.text;
+          hit.appendChild(head);
+          hit.appendChild(txt);
+          body.appendChild(hit);
+        });
+        det.appendChild(body);
+        extrasEl.appendChild(det);
+      });
+
+      es.addEventListener('llm_input', function (e) {
+        const d = JSON.parse(e.data);
+        const det = document.createElement('details');
+        det.className = 'disc';
+        const sum = document.createElement('summary');
+        sum.textContent = '📤 Prompt sent to LLM (~' + d.approx_tokens +
+          ' tokens, ' + d.chars + ' chars)';
+        promptSummary = sum;
+        det.appendChild(sum);
+        const body = document.createElement('div');
+        body.className = 'disc-body';
+        const pre = document.createElement('pre');
+        pre.textContent = 'SYSTEM:\\n' + d.system + '\\n\\nUSER:\\n' + d.user;
+        body.appendChild(pre);
+        det.appendChild(body);
+        extrasEl.appendChild(det);
       });
 
       es.addEventListener('llm_first_token', function (e) {
@@ -216,6 +286,10 @@ PAGE = """
             (d.tok_per_sec ? ' (' + d.tok_per_sec + ' tok/s)' : ''));
           if (d.load_ms) bits.push('model load ' + fmt(d.load_ms));
           llmstatsEl.textContent = '⚡ ' + bits.join(' · ');
+        }
+        if (promptSummary && d.prompt_tokens) {
+          promptSummary.textContent =
+            '📤 Prompt sent to LLM (' + d.prompt_tokens + ' tokens)';
         }
       });
 

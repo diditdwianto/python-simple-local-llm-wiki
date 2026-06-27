@@ -8,7 +8,7 @@ from typing import Dict, Iterator, List, Tuple
 
 from .config import settings
 from .embeddings import embed_query
-from .generate import generate, generate_stream
+from .generate import build_llm_input, generate, generate_stream
 from .store import VectorStore
 
 
@@ -58,6 +58,30 @@ def answer_streamed(question: str, k: int = None) -> Iterator[Tuple[str, Dict]]:
         "name": name,
         "ms": (time.perf_counter() - t) * 1000,
         "hits": len(contexts),
+    }
+
+    # Expose the retrieved chunks (for the collapsible "search hits" panel).
+    yield "retrieval", {
+        "hits": [
+            {
+                "source": c.get("source"),
+                "score": round(c.get("score", 0.0), 3),
+                "path": c.get("path"),
+                "chunk": c.get("chunk"),
+                "text": c.get("text", ""),
+            }
+            for c in contexts
+        ]
+    }
+
+    # Expose the exact prompt that will be sent (for the collapsible "prompt" panel).
+    llm_input = build_llm_input(question, contexts)
+    chars = len(llm_input["system"]) + len(llm_input["user"])
+    yield "llm_input", {
+        "system": llm_input["system"],
+        "user": llm_input["user"],
+        "chars": chars,
+        "approx_tokens": max(1, chars // 4),  # rough estimate; exact count comes later
     }
 
     # 4) Generate the grounded answer with the LLM, streaming token by token.

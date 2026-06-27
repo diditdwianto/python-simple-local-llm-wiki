@@ -8,7 +8,7 @@ from typing import Dict, Iterator, List, Tuple
 
 from .config import settings
 from .embeddings import embed_query
-from .generate import generate
+from .generate import generate, generate_stream
 from .store import VectorStore
 
 
@@ -60,12 +60,42 @@ def answer_streamed(question: str, k: int = None) -> Iterator[Tuple[str, Dict]]:
         "hits": len(contexts),
     }
 
-    # 4) Generate the grounded answer with the LLM (the slow part)
+    # 4) Generate the grounded answer with the LLM, streaming token by token.
     name = _llm_label()
     yield "stage_start", {"name": name}
     t = time.perf_counter()
-    response = generate(question, contexts)
-    yield "stage_done", {"name": name, "ms": (time.perf_counter() - t) * 1000}
+    first_token_at = None
+    pieces: List[str] = []
+    stats: Dict = {}
+
+    for kind, payload in generate_stream(question, contexts):
+        if kind == "token":
+            if first_token_at is None:
+                first_token_at = time.perf_counter()
+                yield "llm_first_token", {"ms": (first_token_at - t) * 1000}
+            pieces.append(payload)
+            yield "llm_token", {"text": payload}
+        elif kind == "stats":
+            stats = payload
+
+    response = "".join(pieces)
+    elapsed_ms = (time.perf_counter() - t) * 1000
+
+    done = {"name": name, "ms": elapsed_ms}
+    if first_token_at is not None:
+        done["ttft_ms"] = (first_token_at - t) * 1000
+    if stats.get("prompt_tokens") is not None:
+        done["prompt_tokens"] = stats["prompt_tokens"]
+        done["prompt_ms"] = stats.get("prompt_ms")
+    if stats.get("gen_tokens") is not None:
+        done["gen_tokens"] = stats["gen_tokens"]
+        done["gen_ms"] = stats.get("gen_ms")
+        gen_ms = stats.get("gen_ms") or 0
+        if gen_ms > 0:
+            done["tok_per_sec"] = round(stats["gen_tokens"] / (gen_ms / 1000), 1)
+    if stats.get("load_ms"):
+        done["load_ms"] = stats["load_ms"]
+    yield "stage_done", done
 
     yield "result", {
         "answer": response,

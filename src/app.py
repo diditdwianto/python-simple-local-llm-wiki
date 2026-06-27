@@ -65,6 +65,11 @@ PAGE = """
     .stage .ms { margin-left: auto; color: #6b7280;
                  font-variant-numeric: tabular-nums; }
     .total { margin-top: 8px; font-size: 13px; color: #374151; font-weight: 600; }
+    .llmstats { margin-top: 6px; font-size: 12px; color: #6b7280;
+                font-variant-numeric: tabular-nums; }
+    .live { white-space: pre-wrap; }
+    .live::after { content: "▍"; color: #2563eb; animation: blink 1s step-end infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
     .check { color: #16a34a; font-weight: 700; width: 13px; text-align: center; }
     .spinner { display: inline-block; width: 13px; height: 13px; box-sizing: border-box;
                border: 2px solid #c7d2fe; border-top-color: #2563eb;
@@ -102,6 +107,7 @@ PAGE = """
       <div class="activity" id="activity">
         <h4>Activity</h4>
         <div id="stages"></div>
+        <div class="llmstats" id="llmstats"></div>
         <div class="total" id="total"></div>
       </div>
 
@@ -119,6 +125,7 @@ PAGE = """
     const btn = document.getElementById('ask-btn');
     const activityEl = document.getElementById('activity');
     const stagesEl = document.getElementById('stages');
+    const llmstatsEl = document.getElementById('llmstats');
     const totalEl = document.getElementById('total');
     const answerEl = document.getElementById('answer');
     let timer = null, t0 = 0, currentQ = '';
@@ -138,6 +145,7 @@ PAGE = """
       btn.disabled = true;
       answerEl.innerHTML = '';
       stagesEl.innerHTML = '';
+      llmstatsEl.textContent = '';
       totalEl.textContent = '';
       activityEl.style.display = 'block';
       t0 = performance.now();
@@ -147,7 +155,8 @@ PAGE = """
       }, 100);
 
       const rows = {};
-      let done = false;
+      let done = false, activeRow = null, ttftMs = null;
+      let liveEl = null, liveText = '';
       const es = new EventSource('/ask_stream?question=' + encodeURIComponent(q));
 
       es.addEventListener('stage_start', function (e) {
@@ -158,17 +167,56 @@ PAGE = """
           '<span class="label">' + d.name + '</span><span class="ms"></span>';
         stagesEl.appendChild(row);
         rows[d.name] = row;
+        activeRow = row;
+      });
+
+      es.addEventListener('llm_first_token', function (e) {
+        const d = JSON.parse(e.data);
+        ttftMs = d.ms;
+        if (activeRow) {
+          activeRow.querySelector('.ms').textContent =
+            'first token ' + fmt(d.ms) + ' · generating…';
+        }
+        liveText = '';
+        liveEl = document.createElement('div');
+        liveEl.className = 'answer live';
+        answerEl.innerHTML = '';
+        answerEl.appendChild(liveEl);
+      });
+
+      es.addEventListener('llm_token', function (e) {
+        const d = JSON.parse(e.data);
+        liveText += d.text;
+        if (liveEl) liveEl.textContent = liveText;
       });
 
       es.addEventListener('stage_done', function (e) {
         const d = JSON.parse(e.data);
         const row = rows[d.name];
-        if (!row) return;
-        row.classList.add('done');
-        const sp = row.querySelector('.spinner');
-        if (sp) sp.outerHTML = '<span class="check">✓</span>';
-        const extra = (d.hits !== undefined) ? ' · ' + d.hits + ' hits' : '';
-        row.querySelector('.ms').textContent = fmt(d.ms) + extra;
+        if (row) {
+          row.classList.add('done');
+          const sp = row.querySelector('.spinner');
+          if (sp) sp.outerHTML = '<span class="check">✓</span>';
+          let extra = '';
+          if (d.hits !== undefined) {
+            extra = ' · ' + d.hits + ' hits';
+          } else if (d.gen_tokens) {
+            extra = ' · ' + d.gen_tokens + ' tok' +
+              (d.tok_per_sec ? ' @ ' + d.tok_per_sec + ' tok/s' : '');
+          }
+          row.querySelector('.ms').textContent = fmt(d.ms) + extra;
+        }
+        if (d.gen_tokens || d.prompt_tokens) {
+          const bits = [];
+          if (ttftMs != null) bits.push('first token ' + fmt(ttftMs));
+          if (d.prompt_tokens) bits.push('prompt ' + d.prompt_tokens + ' tok' +
+            (d.prompt_ms ? ' in ' + fmt(d.prompt_ms) : ''));
+          if (d.gen_tokens) bits.push('generated ' + d.gen_tokens + ' tok' +
+            (d.gen_ms ? ' in ' + fmt(d.gen_ms) : '') +
+            (d.tok_per_sec ? ' (' + d.tok_per_sec + ' tok/s)' : ''));
+          if (d.load_ms) bits.push('model load ' + fmt(d.load_ms));
+          llmstatsEl.textContent = '⚡ ' + bits.join(' · ');
+        }
       });
 
       es.addEventListener('result', function (e) {
@@ -202,6 +250,7 @@ PAGE = """
     }
 
     function renderAnswer(d) {
+      answerEl.innerHTML = '';
       const wrap = document.createElement('div');
       wrap.className = 'answer';
       wrap.innerHTML = d.answer_html;

@@ -1,0 +1,16 @@
+# Core
+sentence-transformers>=2.6
+faiss-cpu>=1.8
+numpy>=1.26
+python-dotenv>=1.0
+
+# Web UI
+flask>=3.0
+markdown>=3.6
+
+# LLM backends
+requests>=2.31      # used to talk to Ollama
+groq>=0.11          # only needed when LLM_PROVIDER=groq
+
+# Vault auto-reindex
+watchdog>=4.0
